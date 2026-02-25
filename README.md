@@ -42,7 +42,6 @@ ollama run llama3.2 "Reply with only valid JSON: {\"ok\": true}"
 ### 3. Clone / set up the project
 
 ```bash
-cd email_agent/
 python -m venv .venv
 # Windows:
 .venv\Scripts\activate
@@ -94,7 +93,7 @@ variable.
 | `GMAIL_USER` | — | Gmail address |
 | `GMAIL_APP_PASSWORD` | — | Google App Password |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
-| `OLLAMA_MODEL` | `llama3.2` | Model name (must be pulled) |
+| `OLLAMA_MODEL` | `mistral` | Model name (must be pulled) |
 | `OLLAMA_TIMEOUT` | `120` | Request timeout in seconds |
 | `POLL_INTERVAL_SECONDS` | `300` | Seconds between Gmail polls |
 | `MAX_BODY_CHARS` | `4000` | Max email body chars sent to LLM |
