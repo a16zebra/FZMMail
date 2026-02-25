@@ -153,42 +153,95 @@ class GmailClient:
         Yield unread emails from the INBOX as dicts::
 
             {
-                "message_id": str,   # stable unique ID (Message-ID header or hash)
+                "imap_uid":   str,   # IMAP UID — use for apply_label / mark_as_spam
+                "message_id": str,   # stable dedup key (Message-ID header or hash)
                 "subject":    str,
                 "sender":     str,
                 "received_at": str,  # ISO-8601 UTC string, or raw Date header
                 "body":       str,   # plain-text, truncated to MAX_BODY_CHARS
             }
 
+        Opens the mailbox read-write so that action methods work.
         Skips messages that cannot be fetched or parsed, logging a warning.
         """
         if self._imap is None:
             raise RuntimeError("Not connected. Call connect() or use as a context manager.")
 
-        self._imap.select("INBOX", readonly=True)
+        # read-write: required for apply_label / mark_as_spam
+        self._imap.select("INBOX")
 
-        status, data = self._imap.search(None, "UNSEEN")
+        status, data = self._imap.uid("SEARCH", None, "UNSEEN")
         if status != "OK":
-            logger.error("IMAP SEARCH failed: %s", status)
+            logger.error("UID SEARCH failed: %s", status)
             return
 
-        seq_nums: list[bytes] = data[0].split() if data[0] else []
-        logger.info("Found %d unread message(s) in INBOX.", len(seq_nums))
+        uid_list: list[str] = data[0].decode().split() if data[0] else []
+        logger.info("Found %d unread message(s) in INBOX.", len(uid_list))
 
-        for seq in seq_nums:
+        for uid in uid_list:
             try:
-                yield self._fetch_one(seq)
+                yield self._fetch_one_by_uid(uid)
             except Exception as exc:
-                logger.warning("Skipping message seq=%s — %s", seq.decode(), exc)
+                logger.warning("Skipping UID %s — %s", uid, exc)
                 continue
+
+    def ensure_label_exists(self, label: str) -> None:
+        """
+        Create a Gmail label if it doesn't already exist.
+
+        Silently succeeds if the label is already present.
+        Logs a warning (but does not raise) on unexpected failures.
+        """
+        if self._imap is None:
+            raise RuntimeError("Not connected.")
+        status, response = self._imap.create(label)
+        if status == "OK":
+            logger.info("Created Gmail label: %r", label)
+        else:
+            resp = (response[0] if response else b"").decode("utf-8", errors="replace")
+            if "ALREADYEXISTS" in resp or "exists" in resp.lower():
+                logger.debug("Label already exists: %r", label)
+            else:
+                logger.warning("Could not create label %r: %s", label, resp)
+
+    def apply_label(self, uid: str, label: str) -> None:
+        """
+        Add a Gmail label to a message.
+
+        The message remains in the INBOX — this only adds the label tag,
+        equivalent to Gmail's "label" action.
+        """
+        if self._imap is None:
+            raise RuntimeError("Not connected.")
+        status, response = self._imap.uid("COPY", uid, label)
+        if status != "OK":
+            logger.warning("Could not apply label %r to UID %s: %s", label, uid, response)
+        else:
+            logger.debug("Applied label %r to UID %s.", label, uid)
+
+    def mark_as_spam(self, uid: str) -> None:
+        """
+        Move a message to Gmail's Spam folder.
+
+        Copies to [Gmail]/Spam, flags the original as deleted, then expunges.
+        """
+        if self._imap is None:
+            raise RuntimeError("Not connected.")
+        status, _ = self._imap.uid("COPY", uid, "[Gmail]/Spam")
+        if status != "OK":
+            logger.warning("Could not copy UID %s to Spam — skipping.", uid)
+            return
+        self._imap.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+        self._imap.expunge()
+        logger.info("Moved UID %s to Spam.", uid)
 
     # ── internals ─────────────────────────────────────────────────────────
 
-    def _fetch_one(self, seq: bytes) -> dict:
-        """Fetch a single message by sequence number and return a data dict."""
-        status, raw_data = self._imap.fetch(seq, "(RFC822)")
+    def _fetch_one_by_uid(self, uid: str) -> dict:
+        """Fetch a single message by IMAP UID and return a data dict."""
+        status, raw_data = self._imap.uid("FETCH", uid, "(RFC822)")
         if status != "OK" or not raw_data or raw_data[0] is None:
-            raise ValueError(f"FETCH returned status={status!r}")
+            raise ValueError(f"UID FETCH returned status={status!r}")
 
         raw_bytes: bytes = raw_data[0][1]  # type: ignore[index]
         msg: Message = email.message_from_bytes(raw_bytes)
@@ -209,6 +262,7 @@ class GmailClient:
         message_id = _stable_message_id(msg, subject, sender, date_str)
 
         return {
+            "imap_uid": uid,
             "message_id": message_id,
             "subject": subject or "(no subject)",
             "sender": sender or "unknown",

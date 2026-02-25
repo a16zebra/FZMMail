@@ -23,6 +23,7 @@ _CREATE_EMAILS = """
 CREATE TABLE IF NOT EXISTS emails (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     message_id  TEXT    UNIQUE NOT NULL,
+    imap_uid    TEXT,
     subject     TEXT,
     sender      TEXT,
     received_at TEXT,
@@ -33,15 +34,16 @@ CREATE TABLE IF NOT EXISTS emails (
 
 _CREATE_ANALYSES = """
 CREATE TABLE IF NOT EXISTS analyses (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_id       TEXT    UNIQUE NOT NULL,
-    category         TEXT,
-    urgency          TEXT,
-    summary          TEXT,
-    requires_action  INTEGER NOT NULL DEFAULT 0,
-    importance_score REAL    NOT NULL DEFAULT 0.0,
-    raw_response     TEXT,
-    created_at       TEXT    NOT NULL,
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id           TEXT    UNIQUE NOT NULL,
+    category             TEXT,
+    urgency              TEXT,
+    summary              TEXT,
+    requires_action      INTEGER NOT NULL DEFAULT 0,
+    requires_verification INTEGER NOT NULL DEFAULT 0,
+    importance_score     REAL    NOT NULL DEFAULT 0.0,
+    raw_response         TEXT,
+    created_at           TEXT    NOT NULL,
     FOREIGN KEY (message_id) REFERENCES emails (message_id)
 )
 """
@@ -75,11 +77,25 @@ def _conn() -> Generator[sqlite3.Connection, None, None]:
 # ── Public API ─────────────────────────────────────────────────────────────
 
 def init_db() -> None:
-    """Create tables and indexes if they don't exist yet."""
+    """Create tables and indexes if they don't exist yet, then migrate."""
     with _conn() as c:
         c.execute(_CREATE_EMAILS)
         c.execute(_CREATE_ANALYSES)
         c.execute(_CREATE_IDX_ANALYSES_CREATED)
+        _migrate(c)
+
+
+def _migrate(c: sqlite3.Connection) -> None:
+    """Add columns introduced after the initial schema without data loss."""
+    existing_emails = {row[1] for row in c.execute("PRAGMA table_info(emails)")}
+    if "imap_uid" not in existing_emails:
+        c.execute("ALTER TABLE emails ADD COLUMN imap_uid TEXT")
+
+    existing_analyses = {row[1] for row in c.execute("PRAGMA table_info(analyses)")}
+    if "requires_verification" not in existing_analyses:
+        c.execute(
+            "ALTER TABLE analyses ADD COLUMN requires_verification INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def is_processed(message_id: str) -> bool:
@@ -97,6 +113,7 @@ def save_email(
     sender: str,
     received_at: str,
     body: str,
+    imap_uid: str | None = None,
 ) -> None:
     """Persist raw email data.  Silently ignores duplicates (IGNORE)."""
     now = _utcnow()
@@ -104,10 +121,10 @@ def save_email(
         c.execute(
             """
             INSERT OR IGNORE INTO emails
-                (message_id, subject, sender, received_at, body, stored_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (message_id, imap_uid, subject, sender, received_at, body, stored_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (message_id, subject, sender, received_at, body, now),
+            (message_id, imap_uid, subject, sender, received_at, body, now),
         )
 
 
@@ -117,6 +134,7 @@ def save_analysis(
     urgency: str,
     summary: str,
     requires_action: bool,
+    requires_verification: bool,
     importance_score: float,
     raw_response: str,
 ) -> None:
@@ -127,8 +145,8 @@ def save_analysis(
             """
             INSERT OR REPLACE INTO analyses
                 (message_id, category, urgency, summary,
-                 requires_action, importance_score, raw_response, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 requires_action, requires_verification, importance_score, raw_response, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message_id,
@@ -136,6 +154,7 @@ def save_analysis(
                 urgency,
                 summary,
                 int(requires_action),
+                int(requires_verification),
                 importance_score,
                 raw_response,
                 now,
@@ -157,6 +176,7 @@ def get_recent_analyses(limit: int = 10) -> list[dict]:
                 a.urgency,
                 a.summary,
                 a.requires_action,
+                a.requires_verification,
                 a.importance_score,
                 a.created_at
             FROM emails    e

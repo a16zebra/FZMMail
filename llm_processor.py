@@ -4,12 +4,15 @@ llm_processor.py — Ollama interface for FozamiMail.
 Sends email content to a locally-running Ollama model and returns a
 validated analysis dict with these guaranteed keys:
 
-    category         str   one of: work | newsletter | personal | spam |
-                                   finance | support | social | other
-    urgency          str   one of: low | medium | high | critical
-    summary          str   1–2 sentence plain-text summary (≤ 500 chars)
-    requires_action  bool  True if the recipient must do something
-    importance_score float 0.0–10.0
+    category              str   one of: work | newsletter | personal | spam |
+                                        finance | support | social | other
+    urgency               str   one of: low | medium | high | critical
+    summary               str   1–2 sentence plain-text summary (≤ 500 chars)
+    requires_action       bool  True if the recipient must actively DO something
+    requires_verification bool  True if the recipient must VERIFY their own activity
+    importance_score      float 0.0–10.0
+
+requires_action and requires_verification are mutually exclusive.
 
 The function raises RuntimeError on connection problems (Ollama not running)
 and ValueError on persistent JSON parse failures.
@@ -35,11 +38,17 @@ JSON object — no prose, no markdown fences, no extra keys.
 
 Required JSON schema:
 {
-  "category":         string,   // work | newsletter | personal | spam | finance | support | social | other
-  "urgency":          string,   // low | medium | high | critical
-  "summary":          string,   // 1-2 sentence plain-text summary
-  "requires_action":  boolean,  // true if the recipient must do something
-  "importance_score": number    // float 0.0 (irrelevant) to 10.0 (critical)
+  "category":              string,   // work | newsletter | personal | spam | finance | support | social | other
+  "urgency":               string,   // low | medium | high | critical
+  "summary":               string,   // 1-2 sentence plain-text summary
+  "requires_action":       boolean,  // true ONLY if the recipient must actively DO something:
+                                     //   reply, pay, fill a form, make a decision, schedule, register.
+                                     //   Set false for security/verification emails.
+  "requires_verification": boolean,  // true ONLY if the recipient must VERIFY their own recent activity:
+                                     //   login attempts, sign-in alerts, new device access, 2FA prompts,
+                                     //   account security notifications, "was this you?" emails.
+                                     //   Set false if requires_action is true — these two are mutually exclusive.
+  "importance_score":      number    // float 0.0 (irrelevant) to 10.0 (critical)
 }
 """
 
@@ -194,6 +203,15 @@ def _parse_and_validate(raw: str) -> dict:
     except (TypeError, ValueError):
         requires_action = False
 
+    try:
+        requires_verification = bool(data.get("requires_verification", False))
+    except (TypeError, ValueError):
+        requires_verification = False
+
+    # Enforce mutual exclusivity: verification takes precedence if both are true.
+    if requires_action and requires_verification:
+        requires_action = False
+
     summary = str(data.get("summary", "")).strip()[:500]
     if not summary:
         summary = "No summary available."
@@ -203,5 +221,6 @@ def _parse_and_validate(raw: str) -> dict:
         "urgency": urgency if urgency in _VALID_URGENCIES else "low",
         "summary": summary,
         "requires_action": requires_action,
+        "requires_verification": requires_verification,
         "importance_score": round(max(0.0, min(10.0, score)), 1),
     }

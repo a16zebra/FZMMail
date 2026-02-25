@@ -30,11 +30,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("fozamimail")
 
+# ── Gmail label names ──────────────────────────────────────────────────────
+
+_LABEL_ACTION       = "Needs-Action"
+_LABEL_VERIFICATION = "Needs-Verification"
+
 # ── ANSI colour helpers ────────────────────────────────────────────────────
 
-_RESET = "\033[0m"
-_BOLD  = "\033[1m"
-_DIM   = "\033[2m"
+_RESET  = "\033[0m"
+_BOLD   = "\033[1m"
+_DIM    = "\033[2m"
+_CYAN   = "\033[96m"   # verification tag
 _URGENCY_COLOUR = {
     "low":      "\033[90m",   # dark grey
     "medium":   "\033[93m",   # yellow
@@ -49,10 +55,18 @@ def _colour(urgency: str, text: str) -> str:
 
 # ── Display helpers ────────────────────────────────────────────────────────
 
+def _status_tag(analysis: dict) -> str:
+    """Return a coloured status tag string, or empty string if none applies."""
+    if analysis.get("requires_verification"):
+        return f"  {_CYAN}{_BOLD}[VERIFY ACTIVITY]{_RESET}"
+    if analysis.get("requires_action"):
+        return f"  {_BOLD}[ACTION REQUIRED]{_RESET}"
+    return ""
+
+
 def _print_analysis(email_data: dict, analysis: dict) -> None:
     """Print a formatted card for one processed email."""
     urgency = analysis["urgency"]
-    action_tag = f"  {_BOLD}[ACTION REQUIRED]{_RESET}" if analysis["requires_action"] else ""
     score = analysis["importance_score"]
 
     print(f"\n{'─' * 64}")
@@ -61,7 +75,7 @@ def _print_analysis(email_data: dict, analysis: dict) -> None:
     print(f"{_BOLD}Date    {_RESET} {email_data['received_at']}")
     print(f"{_BOLD}Category{_RESET} {analysis['category']}")
     print(
-        f"{_BOLD}Urgency {_RESET} {_colour(urgency, urgency.upper())}{action_tag}"
+        f"{_BOLD}Urgency {_RESET} {_colour(urgency, urgency.upper())}{_status_tag(analysis)}"
     )
     print(f"{_BOLD}Score   {_RESET} {score:.1f} / 10")
     print(f"{_BOLD}Summary {_RESET} {analysis['summary']}")
@@ -75,25 +89,32 @@ def _print_recent(limit: int) -> None:
         print("No processed emails in the database yet.")
         return
 
-    print(f"\n{_BOLD}Recent processed emails ({len(rows)} shown){_RESET}\n")
+    print(f"\n{_BOLD}Recent processed emails ({len(rows)} shown){_RESET}")
+    print(f"{_DIM}  A = needs action   V = needs verification{_RESET}\n")
     header = (
         f"{'URGENCY':10} {'SCORE':5}  {'CATEGORY':12}  "
-        f"{'SUBJECT':40}  SENDER"
+        f"{'':2}{'SUBJECT':40}  SENDER"
     )
     print(f"{_DIM}{header}{_RESET}")
-    print("─" * 100)
+    print("─" * 102)
 
     for row in rows:
         urgency = row["urgency"]
-        action_star = "*" if row["requires_action"] else " "
+        if row.get("requires_verification"):
+            status = f"{_CYAN}V{_RESET}"
+        elif row.get("requires_action"):
+            status = f"{_BOLD}A{_RESET}"
+        else:
+            status = " "
         subject = (row["subject"] or "")[:38]
         sender  = (row["sender"]  or "")[:30]
         line = (
             f"{_colour(urgency, urgency.upper()):10} "
             f"{row['importance_score']:5.1f}  "
             f"{row['category']:12}  "
+            f"{status} "
             f"{subject:<40}  "
-            f"{sender}{action_star}"
+            f"{sender}"
         )
         print(line)
 
@@ -112,8 +133,13 @@ def process_new_emails() -> int:
 
     try:
         with GmailClient() as client:
+            # Ensure both labels exist in Gmail before the processing loop.
+            client.ensure_label_exists(_LABEL_ACTION)
+            client.ensure_label_exists(_LABEL_VERIFICATION)
+
             for email_data in client.fetch_unread_emails():
                 mid = email_data["message_id"]
+                uid = email_data["imap_uid"]
 
                 if database.is_processed(mid):
                     logger.debug("Already processed — skipping: %s", mid)
@@ -141,21 +167,32 @@ def process_new_emails() -> int:
                     logger.warning("Parse error for %s: %s — skipping.", mid, exc)
                     continue
 
+                # ── Gmail actions ──────────────────────────────────────
+                if analysis["category"] == "spam":
+                    client.mark_as_spam(uid)
+                else:
+                    if analysis["requires_action"]:
+                        client.apply_label(uid, _LABEL_ACTION)
+                    if analysis["requires_verification"]:
+                        client.apply_label(uid, _LABEL_VERIFICATION)
+
                 database.save_email(
                     message_id  = mid,
+                    imap_uid    = uid,
                     subject     = email_data["subject"],
                     sender      = email_data["sender"],
                     received_at = email_data["received_at"],
                     body        = email_data["body"],
                 )
                 database.save_analysis(
-                    message_id      = mid,
-                    category        = analysis["category"],
-                    urgency         = analysis["urgency"],
-                    summary         = analysis["summary"],
-                    requires_action = analysis["requires_action"],
-                    importance_score= analysis["importance_score"],
-                    raw_response    = raw,
+                    message_id           = mid,
+                    category             = analysis["category"],
+                    urgency              = analysis["urgency"],
+                    summary              = analysis["summary"],
+                    requires_action      = analysis["requires_action"],
+                    requires_verification= analysis["requires_verification"],
+                    importance_score     = analysis["importance_score"],
+                    raw_response         = raw,
                 )
 
                 _print_analysis(email_data, analysis)
