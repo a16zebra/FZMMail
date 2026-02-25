@@ -1,0 +1,9 @@
+# FozamiMail dependencies
+# Python 3.11+ required
+#
+# stdlib modules used (no install needed):
+#   imaplib, email, sqlite3, hashlib, re, json, logging, argparse, time, sys
+#
+# Third-party:
+requests>=2.31.0        # Ollama HTTP calls
+python-dotenv>=1.0.0    # Load .env file into os.environ
